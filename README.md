@@ -13,7 +13,8 @@ This file contains the following lines:
 - `CONFIG_LIST=`: space separated list of configs.
 - `SECRET_LIST=`: space separated list of secrets.
 - `ENV_FILE=`: filename to update with config and secret variables,
-  defaults to `.env`.
+  defaults to `.env`. If set to an empty string (`""`), updates to the
+  environment file are skipped.
 - `STACK_NAME=`: stack name, used to namespace configs/secrets to
   automatically cleanup when the stack is removed.
 - For each config name in the list above:
@@ -34,6 +35,25 @@ This file contains the following lines:
 - `OPT_PRUNE_UNUSED=`: set to 1 to cleanup unused versions of configs and
   secrets. This currently blindly deletes all configs/secrets other than the
   active one, ignoring errors from those that are still in use.
+
+An example file could look like:
+
+```
+CONFIG_LIST="app demo"
+SECRET_LIST="app passwd"
+CONF_app_SRC_FILE="app.conf"
+CONF_app_TGT_NAME="app-"
+CONF_app_TGT_VAR="app_conf_ver"
+CONF_demo_SRC_TYPE=latest
+CONF_demo_TGT_NAME="demo-"
+CONF_demo_TGT_VAR="demo_conf_ver"
+SEC_app_SRC_FILE="app.sec"
+SEC_app_TGT_NAME="app-"
+SEC_app_TGT_VAR="app_sec_ver"
+SEC_passwd_SRC_TYPE=random
+SEC_passwd_TGT_NAME="passwd-"
+SEC_passwd_TGT_VAR="passwd_ver"
+```
 
 ## The .env file
 
