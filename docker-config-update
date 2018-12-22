@@ -1,0 +1,259 @@
+#!/bin/sh
+
+# By: Brandon Mitchell <public@bmitch.net>
+# License: MIT
+# Source repo: https://github.com/sudo-bmitch/docker-config-update
+
+# Prereqs: docker, jq, sha256sum
+
+set -e
+
+conf_file=".docker-deploy"
+ENV_FILE=".env"
+
+usage() {
+  echo "Usage: $0 [opts]"
+  echo "  -f file: filename to process, defaults to .docker-deploy"
+  echo "  -h: this help message"
+  echo "  -s stack_name: stack name, overrides STACK_NAME settings in file"
+  [ "$opt_h" = "1" ] && exit 0 || exit 1
+}
+
+error() {
+  echo "$*" >&2
+  exit 1
+}
+log() {
+  echo "$*"
+}
+
+while getopts 'f:hs:' option; do
+  case $option in
+    f) conf_file="$OPTARG";;
+    h) opt_h=1;;
+    s) stack_name="$OPTARG";;
+  esac
+done
+shift $(expr $OPTIND - 1)
+if [ "$opt_h" = "1" -o $# -gt 0 ]; then
+  usage
+fi
+
+# Set version in env file
+set_var() {
+  tgt_var="$1"
+  new_ver="$2"
+
+  # if ENV_FILE is intentionally blanked out, then skip this
+  if [ -z "${ENV_FILE}" ]; then
+    return
+  fi
+
+  # check for current version
+  cur_ver=$(grep "^${tgt_var}=" "${ENV_FILE}" | cut -f2 -d=)
+
+  # if aleady on the right version, return
+  if [ "${new_ver}" = "${cur_ver}" ]; then
+    return
+  fi
+
+  # log new version being set
+  log "Updating version: ${tgt_var}=${new_ver}"
+
+  if [ -n "${cur_ver}" ]; then
+    # if already set, modify
+    sed -i "s/^${tgt_var}=.*\$/${tgt_var}=${new_ver}/" "${ENV_FILE}"
+  else
+    # else append a value to the file
+    echo "${tgt_var}=${new_ver}" >> "${ENV_FILE}"
+  fi
+}
+
+# Apply template
+apply_template() {
+  src_file="$1"
+  if [ -f "${src_file}.tmpl" ]; then
+    log "Applying template for ${src_file}"
+    if [ -n "${ENV_FILE}" ]; then
+      env $(cat "$ENV_FILE" | xargs) envsubst <"${src_file}.tmpl" >"${src_file}"
+    else
+      envsubst <"${src_file}.tmpl" >"${src_file}"
+    fi
+  fi
+}
+
+# Load the config file
+common_opts=""
+cd "$(dirname "${conf_file}")"
+. "./$(basename "${conf_file}")"
+if [ -n "${ENV_FILE}" -a ! -f "${ENV_FILE}" ]; then
+  :>>"${ENV_FILE}"
+  chmod 755 "${ENV_FILE}"
+fi
+
+# update the stack name
+if [ -n "${stack_name}" ]; then
+  STACK_NAME="${stack_name}"
+fi
+if [ -n "${STACK_NAME}" ]; then
+  common_opts="${common_opts} -l \"com.docker.stack.namespace=${STACK_NAME}\""
+fi
+
+clean_ver_list() {
+  tgt_name="$1"
+  only_latest="$2"
+  if [ "$only_latest" = "1" ]; then
+    sed "s/^${tgt_name}//" | sort -n | tail -1
+  else
+    sed "s/^${tgt_name}//" | sort -n
+  fi
+}
+
+gen_ver_list() {
+  proc_type="$1"
+  tgt_name="$2"
+  only_latest="$3"
+  docker ${proc_type} ls --filter "name=${tgt_name}" --format "{{.Name}}" \
+    | clean_ver_list "$tgt_name" "$only_latest"
+}
+
+cmp_file_to_ver() {
+  proc_type="$1"
+  tgt_name="$2"
+  cur_ver="$3"
+  src_file="$4"
+
+  if [ "$proc_type" = "config" ]; then
+    docker config inspect --format '{{json .Spec.Data}}' "${tgt_name}${cur_ver}" \
+      | jq -r . | base64 -d | diff - "${src_file}" >/dev/null 2>&1 \
+      && return 0 || return 1
+  elif [ "$proc_type" = "secret" ]; then
+    if [ "$src_file" != "$cmp_file_last_name" ]; then
+      cmp_file_cur_sha256=$(sha256sum "${src_file}" | cut -f1 -d' ')
+      cmp_file_last_name="${src_file}"
+    fi
+    cmp_file_old_sha256=$(docker secret inspect \
+      --format '{{index .Spec.Labels "secret-sha256sum"}}' \
+      "${tgt_name}${cur_ver}" || echo "")
+    [ "$cmp_file_cur_sha256" = "$cmp_file_old_sha256" ] && return 0 || return 1
+  fi
+}
+
+make_new_ver_file() {
+  proc_type="$1"
+  tgt_name="$2"
+  new_ver="$3"
+  src_file="$4"
+
+  if [ "$proc_type" = "config" ]; then
+    log "Creating new config ${tgt_name}${new_ver}"
+    # create a new config
+    docker config create ${common_opts} "${tgt_name}${new_ver}" "${src_file}" >/dev/null
+  elif [ "$proc_type" = "secret" ]; then
+    cur_sha256=$(sha256sum "${src_file}" | cut -f1 -d' ')
+    docker secret create ${common_opts} -l "secret-sha256sum=${cur_sha256}" \
+      "${tgt_name}${new_ver}" "${src_file}" >/dev/null
+  fi
+}
+
+make_new_ver_value() {
+  proc_type="$1"
+  tgt_name="$2"
+  new_ver="$3"
+  src_value="$4"
+
+  if [ "$proc_type" = "config" ]; then
+    log "Creating new config ${tgt_name}${new_ver}"
+    # create a new config
+    echo "$src_value" | docker config create ${common_opts} \
+      "${tgt_name}${new_ver}" -
+  elif [ "$proc_type" = "secret" ]; then
+    cur_sha256=$(echo "$src_value" | sha256sum | cut -f1 -d' ')
+    echo "$src_value" | docker secret create ${common_opts} \
+      -l "secret-sha256sum=${cur_sha256}" "${tgt_name}${new_ver}" -
+  fi
+}
+
+process() {
+  proc_type="$1"
+  proc_list="$2"
+  if [ "$proc_type" = "config" ]; then
+    proc_prefix="CONF"
+  elif [ "$proc_type" = "secret" ]; then
+    proc_prefix="SEC"
+  else
+    error "Unknown object type to process: $proc_type"
+  fi
+
+  for entry in ${proc_list}; do
+    # get variables for current conf name
+    src_type=$(eval echo \"\$${proc_prefix}_${entry}_SRC_TYPE\")
+    tgt_name=$(eval echo \"\$${proc_prefix}_${entry}_TGT_NAME\")
+    tgt_var=$(eval echo \"\$${proc_prefix}_${entry}_TGT_VAR\")
+    if [ -z "$src_type" -o "$src_type" = "file" ]; then
+      # process a file as the source
+      src_file=$(eval echo \"\$${proc_prefix}_${entry}_SRC_FILE\")
+      # use the template if available
+      apply_template "${src_file}"
+      if [ ! -r "${src_file}" ]; then
+        error "Source file does not exist or is not readable for ${proc_type} ${entry}: ${src_file}"
+      fi
+      # compare the src_file to any/all existing configs/secrets
+      unset new_ver latest_ver
+      for cur_ver in $(gen_ver_list $proc_type "$tgt_name" "${OPT_ONLY_LATEST:-0}"); do
+        if cmp_file_to_ver $proc_type "$tgt_name" "$cur_ver" "$src_file"; then
+          new_ver=$cur_ver
+          break
+        fi
+        latest_ver=$cur_ver
+      done
+      if [ -z "$new_ver" ]; then
+        # need to create a new config/secret, first get a new version number
+        if [ -z "$latest_ver" ]; then
+          new_ver=1
+        else
+          new_ver=$(expr "$latest_ver" + 1)
+        fi
+        make_new_ver_file $proc_type "$tgt_name" "$new_ver" "$src_file"
+      fi
+    elif [ "$src_type" = "latest" ]; then
+      # scan list of configs for latest version
+      new_ver=$(gen_ver_list $proc_type "$tgt_name" "1")
+      if [ -z "${new_ver}" ]; then
+        error "Could not find a latest version for ${proc_type} ${entry}"
+      fi
+    elif [ "$src_type" = "random" ]; then
+      latest_ver=$(gen_ver_list $proc_type "$tgt_name" "1")
+      if [ -z "$latest_ver" ]; then
+        new_ver=1
+        new_value=$(base64 -w 0 </dev/urandom | head -c 32)
+        make_new_ver_value $proc_type "$tgt_name" "$new_ver" "$new_value"
+      else
+        new_ver="$latest_ver"
+      fi
+    else
+      error "Unknown source type for ${proc_type} ${entry}: ${src_type}"
+    fi
+    if [ -n "${tgt_var}" ]; then
+      # update the version number in the environment file
+      set_var "${tgt_var}" "${new_ver}"
+    fi
+    if [ "$OPT_PRUNE_UNUSED" = "1" ]; then
+      # attempting to delete an in-use config/secret will fail, so just try and
+      # ignore any errors, skipping the new_ver that will be used next.
+      for cur_ver in $(gen_ver_list $proc_type "$tgt_name" "0"); do
+        if [ "$cur_ver" != "$new_ver" ]; then
+          if docker ${proc_type} rm "${tgt_name}${cur_ver}" >/dev/null 2>&1; then
+            log "Cleaned $proc_type ${tgt_name}${cur_ver}"
+          fi
+        fi
+      done
+    fi
+  done
+}
+
+process config "${CONFIG_LIST}"
+process secret "${SECRET_LIST}"
+
+
+
