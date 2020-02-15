@@ -77,7 +77,7 @@ configs:
 secrets:
   app_sec:
     external: true
-    name: app_sec_${app_sec_var}
+    name: app_sec_${app_sec_ver}
 services:
   app:
     image: app_image
