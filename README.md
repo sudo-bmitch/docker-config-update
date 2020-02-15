@@ -114,6 +114,19 @@ base64 -w 0 </dev/urandom | head -c 32
 This entry will only be created if missing with a version of 1. Otherwise the
 latest version of this secret is saved to the environment file.
 
+## Running from Docker Image
+
+This is also packaged in a docker image and can be run with the following on
+Linux hosts:
+
+```bash
+$ docker container run --rm -it \
+  -u "$(id -u):$(id -g)" --group-add "$(stat -c "%g" /var/run/docker.sock)" \
+  -v "/var/run/docker.sock:/var/run/docker.sock" \
+  -v "$(pwd):$(pwd)" -w "$(pwd)" \
+  sudobmitch/docker-config-update $args
+```
+
 ## License
 
 This script is released under the MIT license.
