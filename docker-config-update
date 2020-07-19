@@ -96,7 +96,7 @@ if [ -n "${stack_name}" ]; then
   STACK_NAME="${stack_name}"
 fi
 if [ -n "${STACK_NAME}" ]; then
-  common_opts="${common_opts} -l \"com.docker.stack.namespace=${STACK_NAME}\""
+  common_opts="${common_opts} -l com.docker.stack.namespace=${STACK_NAME}"
 fi
 
 clean_ver_list() {
