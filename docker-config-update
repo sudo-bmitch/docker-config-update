@@ -4,7 +4,7 @@
 # License: MIT
 # Source repo: https://github.com/sudo-bmitch/docker-config-update
 
-# Prereqs: docker, jq, sha256sum
+# Prereqs: docker, sha256sum
 
 set -e
 
@@ -125,7 +125,7 @@ cmp_file_to_ver() {
 
   if [ "$proc_type" = "config" ]; then
     docker config inspect --format '{{json .Spec.Data}}' "${tgt_name}${cur_ver}" \
-      | jq -r . | base64 -d | diff - "${src_file}" >/dev/null 2>&1 \
+      | sed 's/"//g' | base64 -d | diff - "${src_file}" >/dev/null 2>&1 \
       && return 0 || return 1
   elif [ "$proc_type" = "secret" ]; then
     if [ "$src_file" != "$cmp_file_last_name" ]; then
